@@ -1,0 +1,74 @@
+x-airflow-common: &airflow-common
+  build: .
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: America/Sao_Paulo
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: America/Sao_Paulo
+    AIRFLOW__WEBSERVER__SECRET_KEY: dev-only-change-me
+    # Connection do Airflow definida por variável de ambiente (conn_id = postgres_analytics)
+    AIRFLOW_CONN_POSTGRES_ANALYTICS: postgresql://analytics:analytics@analytics-db:5432/analytics
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./include:/opt/airflow/include
+    - ./logs:/opt/airflow/logs
+  depends_on: &airflow-deps
+    airflow-db:
+      condition: service_healthy
+    analytics-db:
+      condition: service_healthy
+
+services:
+  airflow-db:
+    image: postgres:16
+    environment: {POSTGRES_USER: airflow, POSTGRES_PASSWORD: airflow, POSTGRES_DB: airflow}
+    volumes: [airflow-db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  analytics-db:
+    image: postgres:16
+    environment: {POSTGRES_USER: analytics, POSTGRES_PASSWORD: analytics, POSTGRES_DB: analytics}
+    ports: ["5433:5432"]
+    volumes: [analytics-db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "analytics"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    user: "${AIRFLOW_UID:-50000}:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@shopbrasil.local || true
+        airflow pools set ecommerce_pool 2 "Limita concorrência das tasks mapeadas"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports: ["8080:8080"]
+    depends_on:
+      <<: *airflow-deps
+      airflow-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      retries: 10
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-deps
+      airflow-init: {condition: service_completed_successfully}
+
+volumes:
+  airflow-db-data:
+  analytics-db-data:
